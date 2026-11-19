@@ -615,7 +615,13 @@ def sell_grid_cycle(sym, w, mid, inst, vol_ok, spike, entry_allowed):
     qty = max(qty, float(inst["min_qty"]))
     # максимум позиции + лимиток на монету, $ (запас — уровни стоят выше цены, на шаг × уровни дороже)
     cap = SIZE["per_coin"] * max(c["leverage"], 1) * (1 + step * int(c["grid_levels"]))
-    targets = [round_step(mid * (1 + step * i), inst["tick"]) for i in range(1, int(c["grid_levels"]) + 1)]
+    # якорь сетки: двигаю её, только когда цена ушла от якоря на целый шаг (иначе — сотни перестановок в час
+    # и лимит запросов Bybit). Пока цена внутри шага — сетка стоит, только дозаполняю пустые уровни.
+    anchor = w.get("anchor") or 0
+    if not anchor or abs(mid - anchor) / anchor >= step:
+        anchor = mid
+    w["anchor"] = anchor
+    targets = [round_step(anchor * (1 + step * i), inst["tick"]) for i in range(1, int(c["grid_levels"]) + 1)]
     w["targets"] = targets
     if not c["live"]:
         w["status"] = "SIM"
@@ -646,6 +652,7 @@ def sell_grid_cycle(sym, w, mid, inst, vol_ok, spike, entry_allowed):
             pnl = pos["upnl"]
             close_market(sym)
             cancel_ours(sym)
+            w["anchor"] = 0
             record_trade(sym, pnl, what)
             return
         if c["maker_exit"]:
@@ -688,7 +695,7 @@ def sell_grid_cycle(sym, w, mid, inst, vol_ok, spike, entry_allowed):
 
     sells = [o for o in open_orders(sym) if ours(o, "sg_s_") and o["side"] == "Sell"]
     ensure_leverage(sym)
-    tol = mid * step * 0.35
+    tol = anchor * step * 0.35
     matched, cancel = set(), []
     for o in sells:
         px = float(o.get("price") or 0)
@@ -830,7 +837,7 @@ def cycle():
     if not syms:
         web.update(state="жду цель от сканера")
     errs = 0
-    with ThreadPoolExecutor(max(1, min(8, len(syms) or 1))) as ex:
+    with ThreadPoolExecutor(max(1, min(4, len(syms) or 1))) as ex:
         futs = {ex.submit(process, s, entry_allowed): s for s in syms}
         for f, s in futs.items():
             try:
