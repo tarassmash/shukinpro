@@ -28,7 +28,7 @@ Python-версия страницы `index.html` (Sell Grid — Short, режи
 | `ORDER_USDT` | `12` (Щукин) | размер одного уровня, USDT |
 | `MAX_DAILY_LOSS` | `15` | дневной лимит убытка, $ |
 | `CYCLE_SEC` | `3` | интервал цикла, с |
-| `MAKER_EXIT`, `SPIKE_PROTECT`, `VOL_FILTER` | `1` | мейкер-тейк, защита от спайка, фильтр ATR |
+| `MAKER_EXIT`, `SPIKE_PROTECT`, `VOL_FILTER`, `SHUKIN_FILTER` | `1` | мейкер-тейк, защита от спайка, фильтр ATR, фильтр OI/CVD (фильтры можно вкл/выкл кнопками на странице — выбор сохраняется на диске и важнее переменных) |
 | `MAX_SPIKE_PCT`, `MIN_ATR_PCT`, `MAX_ATR_PCT` | `0.5` / `0.2` / `5` | пороги |
 | `CONTROL_KEY` | — | пароль для кнопок Старт/Стоп |
 | `START_PAUSED` | `0` | `1` — после перезапуска ждать «Старт» |

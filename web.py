@@ -15,6 +15,8 @@ CONTROL_KEY = os.getenv("CONTROL_KEY", "")
 STATUS = {"state": "запуск", "error": "", "started": time.time()}
 LOGS = collections.deque(maxlen=400)
 SNAPSHOT = None
+FILTERS = {}
+SET_FILTER = None
 _lock = threading.Lock()
 
 
@@ -66,9 +68,21 @@ def render():
     hist = "".join(f"<tr><td>{time.strftime('%d.%m %H:%M', time.gmtime(h['t']))}</td><td>{e(h['symbol'])}</td>"
                    f"<td>{e(h['reason'])}</td><td class=\"{'pos' if h['pnl'] >= 0 else 'neg'}\">{h['pnl']:+.3f}</td></tr>"
                    for h in reversed(s.get("history", [])[-50:]))
-    key_in = '<input name="key" type="password" placeholder="CONTROL_KEY">' if CONTROL_KEY else ""
+    key_in = '<input name="key" type="hidden" class="kk">' if CONTROL_KEY else ""
+    key_box = ('<input id="k" type="password" placeholder="пароль CONTROL_KEY" autocomplete="current-password">'
+               if CONTROL_KEY else "")
     btn = "start" if paused else "stop"
     err = f'<div class="err">{e(st["error"])}</div>' if st.get("error") else ""
+    fb = ""
+    for k, label in FILTERS.items():
+        on = bool(c.get(k))
+        fb += (f'<form method="post" action="/filter"><input type="hidden" name="name" value="{k}">{key_in}'
+               f'<button class="f {"on" if on else "off"}">{e(label)}: {"ВКЛ" if on else "ВЫКЛ"}</button></form>')
+    all_on = all(c.get(k) for k in FILTERS)
+    fb += (f'<form method="post" action="/filter"><input type="hidden" name="name" value="all">{key_in}'
+           f'<button class="f all">{"Выключить все фильтры" if all_on else "Включить все фильтры"}</button></form>')
+    if not c.get("shukin"):
+        fb += '<div class="note">Щукин-фильтр работает только в режиме Щукина (SHUKIN=1)</div>' 
     mode = ("ЩУКИН" if c.get("shukin") else "обычный") + " · " + ("LIVE" if c.get("live") else "SIM — ордеров нет (LIVE=0)")
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="10"><title>Sell Grid — Short 24/7</title><style>
@@ -82,10 +96,16 @@ th{{color:#848e9c;font-weight:500}}.pos{{color:#0ecb81}}.neg{{color:#f6465d}}
 .err{{background:rgba(246,70,93,.15);color:#f6465d;padding:10px;border-radius:8px}}
 button{{background:{'#0ecb81' if paused else '#2b3139'};color:{'#000' if paused else '#eaecef'};border:0;border-radius:8px;padding:9px 18px;font-weight:600;cursor:pointer}}
 input{{background:#1a1f27;border:1px solid #1e2329;color:#eaecef;border-radius:6px;padding:8px;margin-right:6px}}
+.fl{{display:flex;flex-wrap:wrap;gap:8px;align-items:center}}.fl form{{display:flex;gap:6px}}
+button.f{{border-radius:8px;padding:9px 14px;font-weight:600;border:1px solid #1e2329}}
+button.f.on{{background:rgba(14,203,129,.15);color:#0ecb81;border-color:#0ecb81}}
+button.f.off{{background:rgba(246,70,93,.12);color:#f6465d;border-color:#f6465d}}
+button.f.all{{background:#1a1f27;color:#eaecef}}.note{{color:#848e9c;font-size:12px}}
 pre{{margin:0;max-height:380px;overflow:auto;font:12px/1.5 ui-monospace,monospace;color:#c9d6d0;white-space:pre-wrap}}
 </style></head><body><div class="wrap">
 <h1>Sell <span>Grid</span> — Short 24/7</h1>{err}
-<div class="p"><form method="post" action="/{btn}">{key_in}<button>{'▶ Старт' if paused else '■ Стоп'}</button></form></div>
+<div class="p fl">{key_box}<form method="post" action="/{btn}">{key_in}<button>{'▶ Старт' if paused else '■ Стоп'}</button></form></div>
+<div class="p"><h2>Фильтры входа (клик — вкл/выкл)</h2><div class="fl">{fb}</div></div>
 <div class="p kv">
 <div><span>Состояние</span><b>{e(st['state'])}</b></div><div><span>Режим</span><b>{e(mode)}</b></div>
 <div><span>Сетка</span><b>шаг {c.get('grid_step_pct')}% × {c.get('grid_levels')} · тейк {c.get('tp_pct')}% · стоп {c.get('sl_pct')}%</b></div>
@@ -98,7 +118,12 @@ pre{{margin:0;max-height:380px;overflow:auto;font:12px/1.5 ui-monospace,monospac
 <th>Мои/все орд.</th><th>ATR</th><th>RSI</th><th>OI / CVD</th><th>Статус</th></tr>{rows or '<tr><td colspan=10>нет</td></tr>'}</table></div>
 <div class="p"><h2>Цели сканера</h2><table><tr><th>Монета</th><th>Изм.</th><th>RSI</th></tr>{tg or '<tr><td colspan=3>—</td></tr>'}</table></div>
 <div class="p"><h2>Сделки</h2><table><tr><th>Время UTC</th><th>Монета</th><th>Выход</th><th>PnL $</th></tr>{hist or '<tr><td colspan=4>пока нет</td></tr>'}</table></div>
-<div class="p"><h2>Лог</h2><pre>{e(chr(10).join(LOGS))}</pre></div></div></body></html>"""
+<div class="p"><h2>Лог</h2><pre>{e(chr(10).join(LOGS))}</pre></div></div>
+<script>(function(){{var k=document.getElementById('k');if(!k)return;
+try{{k.value=localStorage.getItem('sg_ck')||''}}catch(_){{}}
+document.querySelectorAll('form').forEach(function(f){{f.addEventListener('submit',function(){{
+try{{localStorage.setItem('sg_ck',k.value)}}catch(_){{}}
+f.querySelectorAll('.kk').forEach(function(h){{h.value=k.value}})}})}})}})();</script></body></html>"""
 
 
 class H(BaseHTTPRequestHandler):
@@ -132,6 +157,8 @@ class H(BaseHTTPRequestHandler):
         if CONTROL_KEY and (form.get("key") or [""])[0] != CONTROL_KEY:
             return self._send(403, "Неверный CONTROL_KEY. <a href='/'>Назад</a>")
         path = urlparse(self.path).path
+        if path == "/filter" and SET_FILTER:
+            SET_FILTER((form.get("name") or [""])[0])
         if path in ("/start", "/stop"):
             CONTROL["paused"] = path == "/stop"
             logging.getLogger("sg").info("%s со страницы", "Старт" if path == "/start" else "Стоп")

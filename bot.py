@@ -64,6 +64,7 @@ CFG = {
     "max_daily_loss": env("MAX_DAILY_LOSS", 15.0),
     "cycle_sec": max(2, env("CYCLE_SEC", 3)),
     "maker_exit": env("MAKER_EXIT", True),
+    "shukin_filter": env("SHUKIN_FILTER", True),   # фильтр OI + CVD в режиме Щукина
     "spike_protect": env("SPIKE_PROTECT", True),
     "max_spike_pct": env("MAX_SPIKE_PCT", _D["spike"]),
     "vol_filter": env("VOL_FILTER", True),
@@ -98,16 +99,40 @@ def save_state():
         os.makedirs(DATA_DIR, exist_ok=True)
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w") as f:
-            json.dump({k: S[k] for k in ("trades", "wins", "losses", "day_pnl", "day_key", "own", "history")}, f)
+            json.dump({**{k: S[k] for k in ("trades", "wins", "losses", "day_pnl", "day_key", "own", "history")},
+                       "filters": {k: CFG[k] for k in FILTERS}}, f)
         os.replace(tmp, STATE_FILE)
     except Exception as e:  # noqa: BLE001
         log.warning("состояние не сохранилось: %s", e)
 
 
+FILTERS = {"shukin_filter": "Щукин-фильтр OI/CVD", "spike_protect": "Защита от спайка", "vol_filter": "Фильтр ATR"}
+
+
+def set_filter(name, on=None):
+    """Кнопки на странице: включить/выключить фильтр (name='all' — все сразу). Сохраняется на диск."""
+    with LOCK:
+        names = list(FILTERS) if name == "all" else [name] if name in FILTERS else []
+        if not names:
+            return
+        if on is None:
+            on = not all(CFG[n] for n in names) if name == "all" else not CFG[name]
+        for n in names:
+            CFG[n] = bool(on)
+            for w in WATCH.values():
+                w["_logged"] = None
+        save_state()
+    log.info("Фильтры со страницы: %s", ", ".join(f"{FILTERS[n]} {'ВКЛ' if CFG[n] else 'ВЫКЛ'}" for n in names))
+
+
 def load_state():
     try:
         with open(STATE_FILE) as f:
-            S.update(json.load(f))
+            d = json.load(f)
+        for k, v in (d.pop("filters", None) or {}).items():
+            if k in FILTERS:
+                CFG[k] = bool(v)
+        S.update(d)
     except FileNotFoundError:
         pass
     except Exception as e:  # noqa: BLE001
@@ -559,7 +584,7 @@ def sell_grid_cycle(sym, w, mid, inst, vol_ok, spike, entry_allowed):
     if spike or not vol_ok:
         w["status"] = "SPIKE PAUSE" if spike else "VOL FILTER"
         return
-    if c["shukin"]:
+    if c["shukin"] and c["shukin_filter"]:
         if S["cycles"] % 5 == 0 or not w["oi"]:
             try:
                 w["oi"] = open_interest(sym, c["interval"], 50)
@@ -727,6 +752,8 @@ def main():
     global SESSION, HAS_KEYS
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S", stream=sys.stdout, force=True)
     web.SNAPSHOT = snapshot
+    web.FILTERS = FILTERS
+    web.SET_FILTER = set_filter
     web.start()
     load_state()
     SESSION, HAS_KEYS = make_session()
@@ -738,6 +765,7 @@ def main():
              ("LIVE" if CFG["live"] else "SIM") + (" testnet" if CFG["testnet"] else ""), CFG["grid_step_pct"],
              CFG["grid_levels"], CFG["tp_pct"], CFG["sl_pct"], CFG["order_usdt"], CFG["max_daily_loss"],
              CFG["scan_mode"], f", монета {CFG['symbol']}" if CFG["symbol"] else "")
+    log.info("Фильтры: %s", ", ".join(f"{v} {'ВКЛ' if CFG[k] else 'ВЫКЛ'}" for k, v in FILTERS.items()))
     if CFG["live"]:
         try:
             r = api(SESSION.get_wallet_balance, accountType="UNIFIED", coin="USDT")
