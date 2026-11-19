@@ -1,0 +1,10 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "deploy": {
+    "startCommand": "python bot.py",
+    "restartPolicyType": "ALWAYS",
+    "sleepApplication": false,
+    "numReplicas": 1,
+    "healthcheckPath": "/health"
+  }
+}
