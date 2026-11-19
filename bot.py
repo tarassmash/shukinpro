@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 
 from pybit.unified_trading import HTTP
 
@@ -598,7 +598,13 @@ def sell_grid_cycle(sym, w, mid, inst, vol_ok, spike, entry_allowed):
     if c["shukin"]:                      # Щукин: шаг от 1%, тейк от 0.7%, аварийный SL 10%
         step, tp, sl = max(step, 1.0), max(tp, 0.7), max(sl, 10.0)
     step, tp, sl = step / 100, tp / 100, sl / 100
-    qty = max(round_step(SIZE["level_usdt"] / mid, inst["qty_step"]), float(inst["min_qty"]))
+    if SIZE["level_usdt"] <= 0:
+        w["status"] = "жду расчёт размера"
+        return
+    lvl = max(SIZE["level_usdt"], 5.2)                       # Bybit не берёт ордера меньше 5$
+    st = Decimal(str(inst["qty_step"]))
+    qty = float((Decimal(str(lvl / mid)) / st).to_integral_value(ROUND_CEILING) * st)
+    qty = max(qty, float(inst["min_qty"]))
     # максимум позиции + лимиток на монету, $ (запас — уровни стоят выше цены, на шаг × уровни дороже)
     cap = SIZE["per_coin"] * max(c["leverage"], 1) * (1 + step * int(c["grid_levels"]))
     targets = [round_step(mid * (1 + step * i), inst["tick"]) for i in range(1, int(c["grid_levels"]) + 1)]
