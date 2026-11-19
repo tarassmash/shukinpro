@@ -44,6 +44,7 @@ def num(v, nd=4):
 def render():
     snap = SNAPSHOT() if SNAPSHOT else {"cfg": {}, "s": {}, "watch": {}}
     c, s, w = snap["cfg"], snap["s"], snap["watch"]
+    z = snap.get("size") or {}
     with _lock:
         st = dict(STATUS)
     paused = CONTROL["paused"]
@@ -109,7 +110,9 @@ pre{{margin:0;max-height:380px;overflow:auto;font:12px/1.5 ui-monospace,monospac
 <div class="p kv">
 <div><span>Состояние</span><b>{e(st['state'])}</b></div><div><span>Режим</span><b>{e(mode)}</b></div>
 <div><span>Сетка</span><b>шаг {c.get('grid_step_pct')}% × {c.get('grid_levels')} · тейк {c.get('tp_pct')}% · стоп {c.get('sl_pct')}%</b></div>
-<div><span>На уровень / лимит дня</span><b>{c.get('order_usdt')}$ / {c.get('max_daily_loss')}$</b></div>
+<div><span>Депозит в работе</span><b>{z.get('budget', 0):.0f}$ ({c.get('deposit_pct')}% своб.) · {c.get('leverage')}x</b></div>
+<div><span>Монет · на уровень</span><b>{z.get('coins', 0)} × {z.get('level_usdt', 0):.1f}$ · до {z.get('per_coin', 0) * (c.get('leverage') or 1):.0f}$ на монету</b></div>
+<div><span>Лимит дня</span><b>{c.get('max_daily_loss')}$</b></div>
 <div><span>День PnL</span><b class="{'pos' if s.get('day_pnl', 0) >= 0 else 'neg'}">{s.get('day_pnl', 0):+.2f}$</b></div>
 <div><span>Сделок · Win/Loss</span><b>{s.get('trades', 0)} · {s.get('wins', 0)}/{s.get('losses', 0)}</b></div>
 <div><span>Циклов · работает</span><b>{s.get('cycles', 0)} · {up} мин</b></div>

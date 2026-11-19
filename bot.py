@@ -72,7 +72,11 @@ CFG = {
     "max_atr_pct": env("MAX_ATR_PCT", _D["max_atr"]),
     "scan_mode": env("SCAN_MODE", "pump"),         # pump | ultra | off
     "scan_every_min": env("SCAN_EVERY_MIN", 5.0),
-    "max_active": max(1, env("MAX_ACTIVE", 1)),     # сколько монет сканера держать одновременно
+    "max_active": max(1, env("MAX_ACTIVE", 10)),    # максимум монет одновременно (реально — сколько позволит депозит)
+    "sizing": env("SIZING", "auto"),               # auto — размер от депозита; fixed — ORDER_USDT на уровень
+    "deposit_pct": env("DEPOSIT_PCT", 90.0),       # какую часть свободного баланса задействовать, %
+    "leverage": env("LEVERAGE", 3.0),              # плечо на монетах бота
+    "min_level_usdt": env("MIN_LEVEL_USDT", 6.0),  # минимальный уровень сетки, $ (Bybit не берёт ордера < 5$)
     "manage_all": env("MANAGE_ALL", False),
 }
 DATA_DIR = os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or ("/data" if os.path.isdir("/data") else "data")
@@ -94,10 +98,18 @@ INST = {}
 LOCK = threading.RLock()
 
 
+SAVE_LOCK = threading.Lock()
+
+
 def save_state():
+    with SAVE_LOCK:
+        _save_state()
+
+
+def _save_state():
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        tmp = STATE_FILE + ".tmp"
+        tmp = STATE_FILE + f".{threading.get_ident()}.tmp"
         with open(tmp, "w") as f:
             json.dump({**{k: S[k] for k in ("trades", "wins", "losses", "day_pnl", "day_key", "own", "history")},
                        "filters": {k: CFG[k] for k in FILTERS}}, f)
@@ -494,20 +506,22 @@ def maybe_scan(busy_syms):
         return
     keep = [s for s in S["active"] if WATCH.get(s, {}).get("pos", {}).get("size") or WATCH.get(s, {}).get("our_orders")]
     due = time.time() - S["last_scan"] >= CFG["scan_every_min"] * 60
-    if not due and len(S["active"]) >= CFG["max_active"]:
+    if not due and len(S["active"]) >= SIZE["coins"]:
         return
-    if not due and S["targets"]:
-        return
-    try:
-        found = scan_ultra() if CFG["scan_mode"] == "ultra" else scan_pump()
-    except Exception as e:  # noqa: BLE001
-        log.warning("сканер: %s", e)
-        return
-    S["last_scan"] = time.time()
-    S["targets"] = found
-    new = list(keep)
+    if due or not S["targets"]:
+        try:
+            found = scan_ultra() if CFG["scan_mode"] == "ultra" else scan_pump()
+        except Exception as e:  # noqa: BLE001
+            log.warning("сканер: %s", e)
+            return
+        S["last_scan"] = time.time()
+        S["targets"] = found
+        new = list(keep)
+    else:
+        found = S["targets"]                    # депозита хватает на больше монет — добираю из последнего скана
+        new = list(S["active"])
     for t in found:
-        if len(new) >= CFG["max_active"]:
+        if len(new) >= SIZE["coins"]:
             break
         if t["symbol"] in new or t["symbol"] in busy_syms:      # монета другого бота на счёте — не трогаю
             continue
@@ -532,13 +546,61 @@ def watch(sym):
     return WATCH[sym]
 
 
+SIZE = {"budget": 0.0, "per_coin": 0.0, "level_usdt": 0.0, "coins": 1, "free": 0.0, "t": 0.0}
+LEV_SET = set()
+
+
+def update_sizing():
+    """Максимум депозита: (свободный баланс + маржа, уже занятая ботом) × DEPOSIT_PCT делится на монеты.
+    Монет — сколько влезает, чтобы уровень сетки был не меньше MIN_LEVEL_USDT (и не больше MAX_ACTIVE)."""
+    c = CFG
+    if c["sizing"] != "auto":
+        SIZE.update(coins=c["max_active"], level_usdt=c["order_usdt"],
+                    per_coin=c["order_usdt"] * c["grid_levels"] / max(c["leverage"], 1))
+        return
+    if not c["live"]:
+        free = 100.0
+    else:
+        if time.time() - SIZE["t"] < 15:
+            return
+        r = api(SESSION.get_wallet_balance, accountType="UNIFIED")["result"]["list"][0]
+        free = float(r.get("totalAvailableBalance") or 0)
+    mine = 0.0                              # маржа, которую бот уже занял (позиции + свои sell-лимитки)
+    for w in WATCH.values():
+        if w["symbol"] not in S["own"]:
+            continue
+        p = w["pos"]
+        mine += (p["size"] * (p["avg"] or w["mid"]) + w.get("sell_notional", 0.0)) / max(c["leverage"], 1)
+    budget = (free + mine) * c["deposit_pct"] / 100
+    lev, lv = max(c["leverage"], 1), max(int(c["grid_levels"]), 1)
+    coins = int(budget * lev // (lv * c["min_level_usdt"])) if budget > 0 else 0
+    coins = max(1, min(c["max_active"], coins))
+    per = budget / coins
+    SIZE.update(budget=budget, per_coin=per, level_usdt=per * lev / lv, coins=coins, free=free, t=time.time())
+
+
+def ensure_leverage(sym):
+    if sym in LEV_SET or not CFG["live"]:
+        return
+    lev = str(CFG["leverage"]).rstrip("0").rstrip(".")
+    try:
+        api(SESSION.set_leverage, category=CFG["category"], symbol=sym, buyLeverage=lev, sellLeverage=lev)
+        log.info("%s: плечо %sx", sym, lev)
+    except Exception as e:  # noqa: BLE001
+        if "not modified" not in str(e).lower() and "110043" not in str(e):
+            log.warning("%s: плечо не поставилось (%s) — работаю с текущим", sym, e)
+    LEV_SET.add(sym)
+
+
 def sell_grid_cycle(sym, w, mid, inst, vol_ok, spike, entry_allowed):
     c = CFG
     step, tp, sl = c["grid_step_pct"], c["tp_pct"], c["sl_pct"]
     if c["shukin"]:                      # Щукин: шаг от 1%, тейк от 0.7%, аварийный SL 10%
         step, tp, sl = max(step, 1.0), max(tp, 0.7), max(sl, 10.0)
     step, tp, sl = step / 100, tp / 100, sl / 100
-    qty = max(round_step(c["order_usdt"] / mid, inst["qty_step"]), float(inst["min_qty"]))
+    qty = max(round_step(SIZE["level_usdt"] / mid, inst["qty_step"]), float(inst["min_qty"]))
+    # максимум позиции + лимиток на монету, $ (запас — уровни стоят выше цены, на шаг × уровни дороже)
+    cap = SIZE["per_coin"] * max(c["leverage"], 1) * (1 + step * int(c["grid_levels"]))
     targets = [round_step(mid * (1 + step * i), inst["tick"]) for i in range(1, int(c["grid_levels"]) + 1)]
     w["targets"] = targets
     if not c["live"]:
@@ -546,6 +608,20 @@ def sell_grid_cycle(sym, w, mid, inst, vol_ok, spike, entry_allowed):
         return
 
     pos = w["pos"]
+    if pos["size"] > 0 and w["our_orders"]:
+        # позиция выросла: свои sell сверх лимита монеты снимаю (сначала самые дальние) — даже если фильтр «ждать»
+        sl_orders = sorted([o for o in open_orders(sym) if ours(o, "sg_s_")], key=lambda o: float(o.get("price") or 0))
+        used = pos["size"] * (pos["avg"] or mid)
+        for o in sl_orders:
+            n = float(o.get("qty") or 0) * float(o.get("price") or 0)
+            if used + n > cap:
+                try:
+                    api(SESSION.cancel_order, category=c["category"], symbol=sym, orderId=o["orderId"])
+                    log.info("%s: снят @ %s — лимит депозита на монету %.0f$", sym, o.get("price"), cap)
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                used += n
     if pos["size"] > 0 and pos["side"] == "Sell":
         entry = pos["avg"] or mid
         move = (entry - mid) / entry
@@ -597,6 +673,7 @@ def sell_grid_cycle(sym, w, mid, inst, vol_ok, spike, entry_allowed):
             return
 
     sells = [o for o in open_orders(sym) if ours(o, "sg_s_") and o["side"] == "Sell"]
+    ensure_leverage(sym)
     tol = mid * step * 0.35
     matched, cancel = set(), []
     for o in sells:
@@ -612,13 +689,24 @@ def sell_grid_cycle(sym, w, mid, inst, vol_ok, spike, entry_allowed):
             log.info("%s: снят лишний @ %s", sym, o.get("price"))
         except Exception:  # noqa: BLE001
             pass
+    kept = [o for o in sells if o not in cancel]
+    used = pos["size"] * (pos["avg"] or mid) + sum(float(o.get("qty") or 0) * float(o.get("price") or 0) for o in kept)
+    placed = 0
     for px in targets:
         if px in matched:
             continue
+        if used + qty * px > cap:
+            if not placed:
+                w["status"] = f"лимит депозита на монету ({cap:.0f}$)"
+            break
+        used += qty * px
+        placed += 1
         tpp = round_step(px * (1 - tp), inst["tick"])
         slp = round_step(px * (1 + sl), inst["tick"]) if (not c["shukin"] or pos["size"] == 0) else None
         place_sell_limit(sym, qty, px, tpp, slp, inst)
-    w["status"] = "GRID"
+    w["sell_notional"] = used - pos["size"] * (pos["avg"] or mid)
+    if placed or matched:
+        w["status"] = "GRID"
 
 
 def process(sym, entry_allowed):
@@ -715,6 +803,10 @@ def cycle():
     else:
         entry_allowed = True
     syms, busy = universe()
+    try:
+        update_sizing()
+    except Exception as e:  # noqa: BLE001
+        log.warning("баланс для расчёта размера: %s", e)
     if entry_allowed:
         maybe_scan(busy)
         syms, busy = universe()
@@ -737,6 +829,7 @@ def cycle():
     if entry_allowed and syms:
         n_pos = sum(1 for s in syms if WATCH.get(s, {}).get("pos", {}).get("size"))
         web.update(state=("RUN ЩУКИН" if CFG["shukin"] else "RUN GRID") + f" · {len(syms)} пар"
+                   + f" · депозит {SIZE['budget']:.0f}$ → {SIZE['coins']} мон. × {SIZE['level_usdt']:.1f}$/ур."
                    + (f" · POS×{n_pos}" if n_pos else "") + (" · SIM (LIVE=0)" if not CFG["live"] else ""))
 
 
@@ -744,6 +837,7 @@ def snapshot():
     with LOCK:
         return {"cfg": CFG, "s": {k: S[k] for k in ("cycles", "trades", "wins", "losses", "day_pnl", "targets",
                                                     "active", "history", "own")},
+                "size": dict(SIZE),
                 "watch": {k: {kk: v for kk, v in w.items() if kk not in ("candles", "price_hist", "oi")}
                           for k, w in WATCH.items()}}
 
@@ -765,6 +859,9 @@ def main():
              ("LIVE" if CFG["live"] else "SIM") + (" testnet" if CFG["testnet"] else ""), CFG["grid_step_pct"],
              CFG["grid_levels"], CFG["tp_pct"], CFG["sl_pct"], CFG["order_usdt"], CFG["max_daily_loss"],
              CFG["scan_mode"], f", монета {CFG['symbol']}" if CFG["symbol"] else "")
+    log.info("Размер: %s", f"авто — {CFG['deposit_pct']:g}% свободного баланса, плечо {CFG['leverage']:g}x, до "
+             f"{CFG['max_active']} монет, уровень ≥ {CFG['min_level_usdt']:g}$" if CFG["sizing"] == "auto"
+             else f"фиксированный {CFG['order_usdt']:g}$ на уровень")
     log.info("Фильтры: %s", ", ".join(f"{v} {'ВКЛ' if CFG[k] else 'ВЫКЛ'}" for k, v in FILTERS.items()))
     if CFG["live"]:
         try:
