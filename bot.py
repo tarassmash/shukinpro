@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -714,7 +715,7 @@ def snapshot():
 
 def main():
     global SESSION, HAS_KEYS
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S", force=True)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S", stream=sys.stdout, force=True)
     web.SNAPSHOT = snapshot
     web.start()
     load_state()
