@@ -630,6 +630,16 @@ def process(sym, entry_allowed):
     short = w["pos"]["size"] > 0 and w["pos"]["side"] == "Sell"
     allowed = entry_allowed and (sym in S["active"] or CFG["symbol"] == sym or (CFG["shukin"] and short))
     sell_grid_cycle(sym, w, mid, inst, vol_ok, spike, allowed)
+    st = w["status"]
+    if st != w.get("_logged"):          # в лог — только смена статуса (почему ставлю / не ставлю сетку)
+        w["_logged"] = st
+        extra = ""
+        if w.get("atr") is not None:
+            extra = f" (ATR {w['atr'] * 100:.2f}%, RSI {w['rsi'] or 0:.0f}"
+            if w.get("sig"):
+                extra += f", OI {w['sig']['oi_trend']} {w['sig']['oi_chg']:+.1f}%, CVD {w['sig']['cvd_trend']}"
+            extra += ")"
+        log.info("%s: статус → %s%s", sym, st, extra)
 
 
 def universe():
