@@ -199,9 +199,17 @@ def round_step(v, step):
     return float((Decimal(str(v)) / st).to_integral_value(ROUND_HALF_UP) * st)
 
 
+def fmt_num(d):
+    """Decimal → строка без экспоненты и без лишних нулей после точки (80 остаётся «80»)."""
+    t = format(d, "f")
+    if "." in t:
+        t = t.rstrip("0").rstrip(".")
+    return t or "0"
+
+
 def fmt_qty(q, step):
     st = Decimal(str(step))
-    return str((Decimal(str(q)) / st).to_integral_value(ROUND_HALF_UP) * st).rstrip("0").rstrip(".") or "0"
+    return fmt_num((Decimal(str(q)) / st).to_integral_value(ROUND_HALF_UP) * st)
 
 
 def instrument(sym):
@@ -313,7 +321,7 @@ def place_maker_exit(sym, pos, tp_price, inst):
         return
     side = "Sell" if pos["side"] == "Buy" else "Buy"
     body = dict(category=CFG["category"], symbol=sym, side=side, orderType="Limit",
-                qty=fmt_qty(pos["size"], inst["qty_step"]), price=str(round_step(tp_price, inst["tick"])),
+                qty=fmt_qty(pos["size"], inst["qty_step"]), price=fmt_num(Decimal(str(round_step(tp_price, inst["tick"])))),
                 timeInForce="PostOnly", reduceOnly=True, positionIdx=0, orderLinkId=link("sg_tp_"))
     try:
         api(SESSION.place_order, **body)
@@ -329,12 +337,12 @@ def place_maker_exit(sym, pos, tp_price, inst):
 
 def place_sell_limit(sym, qty, price, tp, sl, inst):
     body = dict(category=CFG["category"], symbol=sym, side="Sell", orderType="Limit",
-                qty=fmt_qty(qty, inst["qty_step"]), price=str(round_step(price, inst["tick"])),
+                qty=fmt_qty(qty, inst["qty_step"]), price=fmt_num(Decimal(str(round_step(price, inst["tick"])))),
                 timeInForce="GTC", positionIdx=0, orderLinkId=link("sg_s_"))
     if sl:
-        body.update(stopLoss=str(sl), slTriggerBy="LastPrice")
+        body.update(stopLoss=fmt_num(Decimal(str(sl))), slTriggerBy="LastPrice")
     if tp and not CFG["maker_exit"]:
-        body.update(takeProfit=str(tp), tpTriggerBy="LastPrice")
+        body.update(takeProfit=fmt_num(Decimal(str(tp))), tpTriggerBy="LastPrice")
     try:
         r = api(SESSION.place_order, **body)
         log.info("%s: ✅ Sell %s @ %s #%s", sym, body["qty"], body["price"], r["result"].get("orderId"))
